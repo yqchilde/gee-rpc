@@ -63,6 +63,7 @@ func (s *Server) ServeConn(conn io.ReadWriteCloser) {
 	f := codec.NewCodecFuncMap[opt.CodecType]
 	if f == nil {
 		log.Printf("rpc server: invalid codec type %s", opt.CodecType)
+		return
 	}
 	s.ServeCodec(f(conn))
 }

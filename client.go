@@ -159,7 +159,6 @@ func parseOptions(opts ...*Option) (*Option, error) {
 		return nil, errors.New("number of options is more than 1")
 	}
 	opt := opts[0]
-	opt.MagicNumber = DefaultOption.MagicNumber
 	if opt.CodecType == "" {
 		opt.CodecType = DefaultOption.CodecType
 	}
