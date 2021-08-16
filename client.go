@@ -1,6 +1,7 @@
 package geerpc
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/yqchilde/gee-rpc/codec"
 )
@@ -42,76 +44,76 @@ var _ io.Closer = (*Client)(nil)
 var ErrShutdown = errors.New("connection is shut down")
 
 // Close 关闭连接
-func (c *Client) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closing {
+func (client *Client) Close() error {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if client.closing {
 		return ErrShutdown
 	}
-	c.closing = true
-	return c.c.Close()
+	client.closing = true
+	return client.c.Close()
 }
 
 // IsAvailable 检查客户端是否被关闭
-func (c *Client) IsAvailable() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return !c.shutdown && !c.closing
+func (client *Client) IsAvailable() bool {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	return !client.shutdown && !client.closing
 }
 
 // registerCall 将参数call添加到client.pending中，并更新client.seq
-func (c *Client) registerCall(call *Call) (uint64, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closing || c.shutdown {
+func (client *Client) registerCall(call *Call) (uint64, error) {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if client.closing || client.shutdown {
 		return 0, ErrShutdown
 	}
-	call.Seq = c.seq
-	c.pending[call.Seq] = call
-	c.seq++
+	call.Seq = client.seq
+	client.pending[call.Seq] = call
+	client.seq++
 	return call.Seq, nil
 
 }
 
 // removeCall 根据seq，从client.pending中移除对应的call，并返回
-func (c *Client) removeCall(seq uint64) *Call {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	call := c.pending[seq]
-	delete(c.pending, seq)
+func (client *Client) removeCall(seq uint64) *Call {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	call := client.pending[seq]
+	delete(client.pending, seq)
 	return call
 }
 
 // terminateCalls 服务端或客户端发生错误时调用，将shutdown设置为true，且将错误信息通知所有pending状态的call
-func (c *Client) terminateCalls(err error) {
-	c.sending.Lock()
-	defer c.sending.Unlock()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.shutdown = true
-	for _, call := range c.pending {
+func (client *Client) terminateCalls(err error) {
+	client.sending.Lock()
+	defer client.sending.Unlock()
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	client.shutdown = true
+	for _, call := range client.pending {
 		call.Error = err
 		call.done()
 	}
 }
 
-func (c *Client) receive() {
+func (client *Client) receive() {
 	var err error
 	for err == nil {
 		var h codec.Header
-		if err = c.c.ReadHeader(&h); err != nil {
+		if err = client.c.ReadHeader(&h); err != nil {
 			break
 		}
-		call := c.removeCall(h.Seq)
+		call := client.removeCall(h.Seq)
 		switch {
 		case call == nil:
-			err = c.c.ReadBody(nil)
+			err = client.c.ReadBody(nil)
 		case h.Error != "":
 			call.Error = fmt.Errorf(h.Error)
-			err = c.c.ReadBody(nil)
+			err = client.c.ReadBody(nil)
 			call.done()
 		default:
-			err = c.c.ReadBody(call.Reply)
+			err = client.c.ReadBody(call.Reply)
 			if err != nil {
 				call.Error = errors.New("reading body " + err.Error())
 			}
@@ -120,7 +122,7 @@ func (c *Client) receive() {
 	}
 
 	// 发生错误，因此 terminateCalls 挂起的调用
-	c.terminateCalls(err)
+	client.terminateCalls(err)
 }
 
 // NewClient 协议交换
@@ -167,30 +169,16 @@ func parseOptions(opts ...*Option) (*Option, error) {
 }
 
 func Dial(network, address string, opts ...*Option) (client *Client, err error) {
-	opt, err := parseOptions(opts...)
-	if err != nil {
-		return nil, err
-	}
-	conn, err := net.Dial(network, address)
-	if err != nil {
-		return nil, err
-	}
-	// close the connection if client is nil
-	defer func() {
-		if client == nil {
-			_ = conn.Close()
-		}
-	}()
-	return NewClient(conn, opt)
+	return dialTimeout(NewClient, network, address, opts...)
 }
 
-func (c *Client) send(call *Call) {
+func (client *Client) send(call *Call) {
 	// make sure that the client will send a complete request
-	c.sending.Lock()
-	defer c.sending.Unlock()
+	client.sending.Lock()
+	defer client.sending.Unlock()
 
 	// register this call
-	seq, err := c.registerCall(call)
+	seq, err := client.registerCall(call)
 	if err != nil {
 		call.Error = err
 		call.done()
@@ -198,13 +186,13 @@ func (c *Client) send(call *Call) {
 	}
 
 	// parse request header
-	c.header.ServiceMethod = call.ServiceMethod
-	c.header.Seq = seq
-	c.header.Error = ""
+	client.header.ServiceMethod = call.ServiceMethod
+	client.header.Seq = seq
+	client.header.Error = ""
 
 	// encode and send the request
-	if err := c.c.Write(&c.header, call.Args); err != nil {
-		call := c.removeCall(seq)
+	if err := client.c.Write(&client.header, call.Args); err != nil {
+		call := client.removeCall(seq)
 		// call可能为nil，这通常意味着写入部分失败，客户端已收到响应并已处理
 		if call != nil {
 			call.Error = err
@@ -213,7 +201,7 @@ func (c *Client) send(call *Call) {
 	}
 }
 
-func (c *Client) Go(serviceMethod string, args, reply interface{}, done chan *Call) *Call {
+func (client *Client) Go(serviceMethod string, args, reply interface{}, done chan *Call) *Call {
 	if done == nil {
 		done = make(chan *Call, 0)
 	} else if cap(done) == 0 {
@@ -225,11 +213,56 @@ func (c *Client) Go(serviceMethod string, args, reply interface{}, done chan *Ca
 		Reply:         reply,
 		Done:          done,
 	}
-	c.send(call)
+	client.send(call)
 	return call
 }
 
-func (c *Client) Call(serviceMethod string, args, reply interface{}) error {
-	call := <-c.Go(serviceMethod, args, reply, make(chan *Call, 1)).Done
-	return call.Error
+func (client *Client) Call(ctx context.Context, serviceMethod string, args, reply interface{}) error {
+	call := client.Go(serviceMethod, args, reply, make(chan *Call, 1))
+	select {
+	case <-ctx.Done():
+		client.removeCall(call.Seq)
+		return errors.New("rpc client: call failed: " + ctx.Err().Error())
+	case done := <-call.Done:
+		return done.Error
+	}
+}
+
+type clientResult struct {
+	client *Client
+	err    error
+}
+
+type newClientFunc func(conn net.Conn, opt *Option) (client *Client, err error)
+
+func dialTimeout(f newClientFunc, network, address string, opts ...*Option) (client *Client, err error) {
+	opt, err := parseOptions(opts...)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := net.DialTimeout(network, address, opt.ConnectTimeout)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			_ = conn.Close()
+		}
+	}()
+
+	ch := make(chan clientResult)
+	go func() {
+		client, err := f(conn, opt)
+		ch <- clientResult{client: client, err: err}
+	}()
+	if opt.ConnectTimeout == 0 {
+		result := <-ch
+		return result.client, result.err
+	}
+	select {
+	case <-time.After(opt.ConnectTimeout):
+		return nil, fmt.Errorf("rpc client: connect timeout: expect within %s", opt.ConnectTimeout)
+	case result := <-ch:
+		return result.client, result.err
+	}
 }
