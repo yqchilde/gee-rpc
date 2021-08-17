@@ -97,81 +97,6 @@ func (client *Client) terminateCalls(err error) {
 	}
 }
 
-func (client *Client) receive() {
-	var err error
-	for err == nil {
-		var h codec.Header
-		if err = client.c.ReadHeader(&h); err != nil {
-			break
-		}
-		call := client.removeCall(h.Seq)
-		switch {
-		case call == nil:
-			err = client.c.ReadBody(nil)
-		case h.Error != "":
-			call.Error = fmt.Errorf(h.Error)
-			err = client.c.ReadBody(nil)
-			call.done()
-		default:
-			err = client.c.ReadBody(call.Reply)
-			if err != nil {
-				call.Error = errors.New("reading body " + err.Error())
-			}
-			call.done()
-		}
-	}
-
-	// 发生错误，因此 terminateCalls 挂起的调用
-	client.terminateCalls(err)
-}
-
-// NewClient 协议交换
-func NewClient(conn net.Conn, opt *Option) (*Client, error) {
-	f := codec.NewCodecFuncMap[opt.CodecType]
-	if f == nil {
-		err := fmt.Errorf("invalid codec type %s", opt.CodecType)
-		log.Println("rpc client: codec error:", err)
-		return nil, err
-	}
-	// send options with server
-	if err := json.NewEncoder(conn).Encode(opt); err != nil {
-		log.Println("rpc client: options error:", err)
-		_ = conn.Close()
-		return nil, err
-	}
-	return newClientCodec(f(conn), opt), nil
-}
-
-func newClientCodec(c codec.Codec, opt *Option) *Client {
-	client := &Client{
-		c:       c,
-		opt:     opt,
-		seq:     1, // seq 从1开始调用，0为无效的调用
-		pending: make(map[uint64]*Call),
-	}
-	go client.receive()
-	return client
-}
-
-func parseOptions(opts ...*Option) (*Option, error) {
-	if len(opts) == 0 || opts[0] == nil {
-		return DefaultOption, nil
-	}
-	if len(opts) != 1 {
-		return nil, errors.New("number of options is more than 1")
-	}
-	opt := opts[0]
-	if opt.CodecType == "" {
-		opt.CodecType = DefaultOption.CodecType
-	}
-
-	return opt, nil
-}
-
-func Dial(network, address string, opts ...*Option) (client *Client, err error) {
-	return dialTimeout(NewClient, network, address, opts...)
-}
-
 func (client *Client) send(call *Call) {
 	// make sure that the client will send a complete request
 	client.sending.Lock()
@@ -201,9 +126,37 @@ func (client *Client) send(call *Call) {
 	}
 }
 
+func (client *Client) receive() {
+	var err error
+	for err == nil {
+		var h codec.Header
+		if err = client.c.ReadHeader(&h); err != nil {
+			break
+		}
+		call := client.removeCall(h.Seq)
+		switch {
+		case call == nil:
+			err = client.c.ReadBody(nil)
+		case h.Error != "":
+			call.Error = fmt.Errorf(h.Error)
+			err = client.c.ReadBody(nil)
+			call.done()
+		default:
+			err = client.c.ReadBody(call.Reply)
+			if err != nil {
+				call.Error = errors.New("reading body " + err.Error())
+			}
+			call.done()
+		}
+	}
+
+	// 发生错误，因此 terminateCalls 挂起的调用
+	client.terminateCalls(err)
+}
+
 func (client *Client) Go(serviceMethod string, args, reply interface{}, done chan *Call) *Call {
 	if done == nil {
-		done = make(chan *Call, 0)
+		done = make(chan *Call, 10)
 	} else if cap(done) == 0 {
 		log.Panic("rpc client: done channel is unbuffered")
 	}
@@ -226,6 +179,47 @@ func (client *Client) Call(ctx context.Context, serviceMethod string, args, repl
 	case done := <-call.Done:
 		return done.Error
 	}
+}
+
+func parseOptions(opts ...*Option) (*Option, error) {
+	if len(opts) == 0 || opts[0] == nil {
+		return DefaultOption, nil
+	}
+	if len(opts) != 1 {
+		return nil, errors.New("number of options is more than 1")
+	}
+	opt := opts[0]
+	if opt.CodecType == "" {
+		opt.CodecType = DefaultOption.CodecType
+	}
+	return opt, nil
+}
+
+// NewClient 协议交换
+func NewClient(conn net.Conn, opt *Option) (client *Client, err error) {
+	f := codec.NewCodecFuncMap[opt.CodecType]
+	if f == nil {
+		err = fmt.Errorf("invalid codec type %s", opt.CodecType)
+		log.Println("rpc client: codec error:", err)
+		return
+	}
+	// send options with server
+	if err = json.NewEncoder(conn).Encode(opt); err != nil {
+		log.Println("rpc client: options error: ", err)
+		return
+	}
+	return newClientCodec(f(conn), opt), nil
+}
+
+func newClientCodec(c codec.Codec, opt *Option) *Client {
+	client := &Client{
+		c:       c,
+		opt:     opt,
+		seq:     1, // seq 从1开始调用，0为无效的调用
+		pending: make(map[uint64]*Call),
+	}
+	go client.receive()
+	return client
 }
 
 type clientResult struct {
@@ -265,4 +259,8 @@ func dialTimeout(f newClientFunc, network, address string, opts ...*Option) (cli
 	case result := <-ch:
 		return result.client, result.err
 	}
+}
+
+func Dial(network, address string, opts ...*Option) (*Client, error) {
+	return dialTimeout(NewClient, network, address, opts...)
 }

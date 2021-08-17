@@ -40,18 +40,6 @@ func NewServer() *Server {
 
 var DefaultServer = NewServer()
 
-// Accept 接受侦听器上的每个接入连接，并且发送连接请求
-func (server *Server) Accept(lis net.Listener) {
-	for {
-		conn, err := lis.Accept()
-		if err != nil {
-			log.Println("rpc server: accept error:", err)
-			return
-		}
-		go server.ServeConn(conn)
-	}
-}
-
 // ServeConn 在单个连接上运行服务器
 // 程序阻塞，服务连接直到客户端断开
 func (server *Server) ServeConn(conn io.ReadWriteCloser) {
@@ -70,13 +58,13 @@ func (server *Server) ServeConn(conn io.ReadWriteCloser) {
 		log.Printf("rpc server: invalid codec type %s", opt.CodecType)
 		return
 	}
-	server.ServeCodec(f(conn), &opt)
+	server.serveCodec(f(conn), &opt)
 }
 
 var invalidRequest = struct{}{}
 
 // ServeCodec 服务端编解码并执行请求返回响应
-func (server *Server) ServeCodec(c codec.Codec, opt *Option) {
+func (server *Server) serveCodec(c codec.Codec, opt *Option) {
 	var sending = &sync.Mutex{}
 	var wg = &sync.WaitGroup{}
 
@@ -104,6 +92,17 @@ type request struct {
 	svc          *service      // 请求服务
 }
 
+func (server *Server) readRequestHeader(c codec.Codec) (*codec.Header, error) {
+	var h codec.Header
+	if err := c.ReadHeader(&h); err != nil {
+		if err != io.EOF && err != io.ErrUnexpectedEOF {
+			log.Println("rpc server: read header error:", err)
+		}
+		return nil, err
+	}
+	return &h, nil
+}
+
 func (server *Server) readRequest(c codec.Codec) (*request, error) {
 	h, err := server.readRequestHeader(c)
 	if err != nil {
@@ -128,17 +127,6 @@ func (server *Server) readRequest(c codec.Codec) (*request, error) {
 	return req, nil
 }
 
-func (server *Server) readRequestHeader(c codec.Codec) (*codec.Header, error) {
-	var h codec.Header
-	if err := c.ReadHeader(&h); err != nil {
-		if err != io.EOF && err != io.ErrUnexpectedEOF {
-			log.Println("rpc server: read header error:", err)
-		}
-		return nil, err
-	}
-	return &h, nil
-}
-
 func (server *Server) sendResponse(c codec.Codec, header *codec.Header, body interface{}, sending *sync.Mutex) {
 	sending.Lock()
 	defer sending.Unlock()
@@ -161,6 +149,8 @@ func (server *Server) handleRequest(c codec.Codec, req *request, sending *sync.M
 			sent <- struct{}{}
 			return
 		}
+		server.sendResponse(c, req.h, req.replyv.Interface(), sending)
+		sent <- struct{}{}
 	}()
 
 	if timeout == 0 {
@@ -176,23 +166,6 @@ func (server *Server) handleRequest(c codec.Codec, req *request, sending *sync.M
 	case <-called:
 		<-sent
 	}
-}
-
-// Accept 服务端开始接受请求
-func Accept(lis net.Listener) {
-	DefaultServer.Accept(lis)
-}
-
-func (server *Server) Register(rcvr interface{}) error {
-	svc := newService(rcvr)
-	if _, dup := server.serviceMap.LoadOrStore(svc.name, svc); dup {
-		return errors.New("rpc: service already defined: " + svc.name)
-	}
-	return nil
-}
-
-func Register(rcvr interface{}) error {
-	return DefaultServer.Register(rcvr)
 }
 
 func (server *Server) findService(serviceMethod string) (svc *service, mtype *methodType, err error) {
@@ -214,3 +187,28 @@ func (server *Server) findService(serviceMethod string) (svc *service, mtype *me
 	}
 	return
 }
+
+// Accept 接受侦听器上的每个接入连接，并且发送连接请求
+func (server *Server) Accept(lis net.Listener) {
+	for {
+		conn, err := lis.Accept()
+		if err != nil {
+			log.Println("rpc server: accept error:", err)
+			return
+		}
+		go server.ServeConn(conn)
+	}
+}
+
+// Accept 服务端开始接受请求
+func Accept(lis net.Listener) { DefaultServer.Accept(lis) }
+
+func (server *Server) Register(rcvr interface{}) error {
+	svc := newService(rcvr)
+	if _, dup := server.serviceMap.LoadOrStore(svc.name, svc); dup {
+		return errors.New("rpc: service already defined: " + svc.name)
+	}
+	return nil
+}
+
+func Register(rcvr interface{}) error { return DefaultServer.Register(rcvr) }
