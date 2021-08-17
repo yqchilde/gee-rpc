@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"reflect"
 	"strings"
 	"sync"
@@ -212,3 +213,38 @@ func (server *Server) Register(rcvr interface{}) error {
 }
 
 func Register(rcvr interface{}) error { return DefaultServer.Register(rcvr) }
+
+const (
+	connected        = "200 Connected to Gee RPC"
+	defaultRPCPath   = "_geerc_"
+	defaultDebugPath = "/debug/geerpc"
+)
+
+// ServeHTTP 实现了一个响应RPC请求的 http.Handler
+func (server *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "CONNECT" {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = io.WriteString(w, "405 must CONNECT\n")
+		return
+	}
+	conn, _, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		log.Print("rpc hijacking ", r.RemoteAddr, ": ", err.Error())
+		return
+	}
+	_, _ = io.WriteString(conn, "HTTP/1.0 "+connected+"\n\n")
+	server.ServeConn(conn)
+}
+
+// HandleHTTP 在 rpcPath 上为 RPC 消息注册一个HTTP处理程序，并通过 debugPath 调试处理程序
+func (server *Server) HandleHTTP() {
+	http.Handle(defaultRPCPath, server)
+	http.Handle(defaultDebugPath, debugHTTP{server})
+	log.Println("rpc server debug path:", defaultDebugPath)
+}
+
+// HandleHTTP server.HandleHTTP
+func HandleHTTP() {
+	DefaultServer.HandleHTTP()
+}

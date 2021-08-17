@@ -11,7 +11,6 @@ import (
 )
 
 func TestServer_ServeConn(t *testing.T) {
-	t.Parallel()
 	addrCh := make(chan string)
 	go startServer(addrCh, "8081", new(Foo))
 	addr := <-addrCh
